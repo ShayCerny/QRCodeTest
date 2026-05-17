@@ -3,15 +3,26 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>p5.js example</title>
+		<title>QR Code Generator</title>
 		<link rel="stylesheet" href="styles.css" />
-		<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
-		<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/addons/p5.sound.min.js"></script>
 	</head>
 
 	<body>
-		<main></main>
+		<main>
+			<div>
+				<label for="data">Data:</label>
+				<input type="text" id="data" />
+			</div>
+			<div>
+				<label for="ECL">Error Correction Level</label>
+				<select name="ECL" id="ECL">
+					<option value="L">Low</option>
+					<option value="M">Medium</option>
+					<option value="Q">Quartile</option>
+					<option value="H">High</option>
+				</select>
+			</div>
+		</main>
+		<script type="module" src="/main.js"></script>
 	</body>
-	<script src="alignment_pattern_positions.js"></script>
-	<script src="index.js"></script>
 </html>
