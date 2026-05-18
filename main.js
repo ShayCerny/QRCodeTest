@@ -8,26 +8,35 @@
  */
 
 import p5 from "p5";
-import { sketch } from "./sketch.js";
+import { sketch, setQR } from "./sketch.js";
+import { QR } from "./qr-generator.js";
 import { detectMode, encodeData } from "./encoder.js";
+import { generateErrorCorrection } from "./error-correction.js";
+import { selectBestMask, applyMask } from "./mask-evaluator.js";
 
-const dataInput  = document.getElementById("data");
-const ECLInput   = document.getElementById("ECL");
-const p5Instance = new p5(sketch);
+const dataInput    = document.getElementById("data");
+const ecLevelInput = document.getElementById("ecLevel");
+const p5Instance   = new p5(sketch);
 
 let debounceTimer;
 
 /**
- * Reads the current UI values, runs the encoder pipeline, and triggers a redraw.
+ * Reads the current UI values, runs the full encoder pipeline, and triggers a redraw.
  * Falls back to "Hello There" when the data field is empty.
  */
 const handleValue = () => {
-	const data = dataInput.value === "" ? "Hello There" : dataInput.value;
-	const ecl  = ECLInput.value;
-	console.log("Data:", data, "| ECL:", ecl);
+	const data    = dataInput.value === "" ? "Hello There" : dataInput.value;
+	const ecLevel = ecLevelInput.value;
 	const mode    = detectMode(data);
-	const encoded = encodeData(data, mode, ecl);
-	console.log(encoded);
+	const encoded = encodeData(data, mode, ecLevel);
+	const codewords = generateErrorCorrection(encoded.codewords, encoded.version, ecLevel);
+
+	const qr = new QR(encoded.version);
+	qr.placeData(codewords);
+	const bestMask = selectBestMask(qr);
+	applyMask(qr, bestMask);
+	qr.writeFormatInfo(ecLevel, bestMask);
+	setQR(qr);
 	p5Instance.redraw();
 };
 
@@ -38,7 +47,7 @@ dataInput.addEventListener("input", () => {
 });
 
 // ECL changes take effect immediately since they come from a controlled dropdown
-ECLInput.addEventListener("change", () => {
+ecLevelInput.addEventListener("change", () => {
 	clearTimeout(debounceTimer);
 	handleValue();
 });

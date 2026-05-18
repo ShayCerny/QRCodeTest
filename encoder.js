@@ -6,25 +6,21 @@
  *
  * Encoding flow:
  *   1. Detect the most compact mode for the input (detectMode)
- *   2. Find the smallest QR version that fits the data at the given ECL
+ *   2. Find the smallest QR version that fits the data at the given ecLevel
  *   3. Build the bit stream: mode indicator → character count → encoded data
  *   4. Append up to 4 terminator zero bits
  *   5. Pad to the next byte boundary
  *   6. Fill remaining capacity with alternating 0xEC / 0x11 pad bytes
  */
 
-import qrData from "./qr_data.json" assert { type: "json" };
-
-const characterCapacities  = qrData.characterCapacities;
-const alphanumericValues   = qrData.alphanumericValues;
-const errorCorrectionBlocks = qrData.errorCorrectionBlocks;
+import { characterCapacities, alphanumericValues, errorCorrectionBlocks } from "./qr_data.js";
 
 /** 4-bit mode indicators as defined in the QR standard. */
 const MODES = {
-	numeric:      0b0001, // digits 0–9 only
+	numeric: 0b0001, // digits 0–9 only
 	alphanumeric: 0b0010, // uppercase A–Z, digits, and $%*+-./:  space
-	byte:         0b0100, // arbitrary ISO-8859-1 data
-	kanji:        0b1000, // double-byte Shift-JIS (not yet implemented)
+	byte: 0b0100, // arbitrary ISO-8859-1 data
+	kanji: 0b1000, // double-byte Shift-JIS (not yet implemented)
 };
 
 /**
@@ -34,10 +30,10 @@ const MODES = {
  *   index 2 → versions 27–40
  */
 const CHAR_COUNT_BITS = {
-	numeric:      [10, 12, 14],
-	alphanumeric: [ 9, 11, 13],
-	byte:         [ 8, 16, 16],
-	kanji:        [ 8, 10, 12],
+	numeric: [10, 12, 14],
+	alphanumeric: [9, 11, 13],
+	byte: [8, 16, 16],
+	kanji: [8, 10, 12],
 };
 
 /**
@@ -142,7 +138,7 @@ export function detectMode(data) {
  * Encodes data into a padded byte array ready for error correction.
  *
  * Steps:
- *   1. Find the smallest QR version whose capacity fits the data at the chosen ECL
+ *   1. Find the smallest QR version whose capacity fits the data at the chosen ecLevel
  *   2. Prepend the 4-bit mode indicator and the character count indicator
  *   3. Append the encoded data payload
  *   4. Append a terminator of up to 4 zero bits
@@ -151,15 +147,15 @@ export function detectMode(data) {
  *
  * @param {string} data                        - Input string to encode
  * @param {'numeric'|'alphanumeric'|'byte'} mode - Encoding mode (from detectMode)
- * @param {'L'|'M'|'Q'|'H'} ECL               - Error correction level
+ * @param {'L'|'M'|'Q'|'H'} ecLevel               - Error correction level
  * @returns {{ version: number, bytes: string[] }} QR version and array of 8-bit strings
  */
-export function encodeData(data, mode, ECL) {
+export function encodeData(data, mode, ecLevel) {
 	const len = data.length;
 	let version = 1;
 
 	// Find the smallest version whose data capacity fits the input length
-	while (characterCapacities[version][ECL][mode] < len) {
+	while (characterCapacities[version][ecLevel][mode] < len) {
 		version++;
 	}
 
@@ -167,7 +163,7 @@ export function encodeData(data, mode, ECL) {
 	const modeIndicator = MODES[mode].toString(2).padStart(4, "0");
 
 	// Character count indicator — bit width depends on mode and version group
-	const charCountBitWidth  = getCharCountBits(mode, version);
+	const charCountBitWidth = getCharCountBits(mode, version);
 	const charCountIndicator = len.toString(2).padStart(charCountBitWidth, "0");
 
 	console.log(version, modeIndicator, charCountIndicator);
@@ -189,8 +185,8 @@ export function encodeData(data, mode, ECL) {
 			break;
 	}
 
-	// Total bits available in this version/ECL combination
-	const bitsNeeded = errorCorrectionBlocks[version][ECL].totalDataCW * 8;
+	// Total bits available in this version/ecLevel combination
+	const bitsNeeded = errorCorrectionBlocks[version][ecLevel].totalDataCW * 8;
 	let bitDifference = bitsNeeded - encoding.length;
 
 	// Append terminator: up to 4 zero bits (fewer if we're already close to capacity)
@@ -218,8 +214,8 @@ export function encodeData(data, mode, ECL) {
 		}
 	}
 
-	// Split the complete bit string into individual 8-bit bytes
-	const bytes = encoding.match(/.{1,8}/g);
+	// Split the complete bit string into individual bytes (integers 0–255)
+	const codewords = encoding.match(/.{1,8}/g).map(b => parseInt(b, 2));
 
-	return { version, bytes };
+	return { version, codewords };
 }

@@ -1,177 +1,252 @@
 /**
- * QR code structural pattern generator.
+ * QR code matrix builder.
  *
- * Builds the fixed structural portions of a QR matrix — finder patterns,
- * alignment patterns, timing strips, and the required dark module — onto a
- * 2D grid before data or format information is placed.
+ * Instantiating QR places all structural patterns (finders + separators,
+ * alignment patterns, timing strips, dark module, format/version info areas)
+ * and marks them reserved. Call placeData() afterwards to fill the remaining
+ * cells with the interleaved data + EC codeword stream.
  *
- * Key exports:
- *   grid     — 2D array of module values (1 = dark, 0 = light, null = not yet set)
+ * Key instance properties:
+ *   version  — QR version (1–40)
+ *   size     — module width/height (4 * version + 17)
+ *   grid     — 2D array (1 = dark, 0 = light, null = not yet placed)
  *   reserved — 2D boolean array; true where a structural pattern occupies a cell
- *   generate — draws all structural patterns onto grid and reserved
  */
 
 import qrData from "./qr_data.json" assert { type: "json" };
-const { alignmentPatternPositions } = qrData;
+const { alignmentPatternPositions, remainderBits } = qrData;
 
-// ─── QR spec constants ────────────────────────────────────────────────────────
-
-/** Finder patterns are always 7×7 modules. */
-const FINDER_SIZE = 7;
-
-/**
- * Row and column index where the horizontal and vertical timing strips run.
- * Per the QR spec, timing strips always occupy row 6 and column 6 (0-indexed).
- */
-const TIMING_STRIP = 6;
-
-/**
- * Column of the required dark module. Per the spec, the dark module is always
- * at column 8; the row is determined by the formula (4 * version + 9).
- */
+const FINDER_SIZE     = 7;
+const TIMING_STRIP    = 6;
 const DARK_MODULE_COL = 8;
 
-// ─── Canvas / grid dimensions ─────────────────────────────────────────────────
-
-export const version = 2;
-
-/** Total module width/height of the QR matrix. QR spec formula: 4 * version + 17. */
-export const size = 4 * version + 17;
-
-const targetWidth = screen.width * 0.3;
-
-/** Width of a single module in pixels, scaled so the QR code fills 30% of screen width. */
-export const pixelSize = targetWidth / size;
-
-/** Padding in pixels on each side, equivalent to a 4-module quiet zone. */
-export const padding = pixelSize * 4;
-
-/** Total canvas width/height in pixels (grid + padding on both sides). */
-export const width = size * pixelSize + padding * 2;
-
-// ─── Grid and reserved arrays ─────────────────────────────────────────────────
+/** 2-bit error correction level indicators per the QR spec. */
+const ECL_BITS = { L: 0b01, M: 0b00, Q: 0b11, H: 0b10 };
 
 /**
- * The QR module grid. Each cell is 1 (dark), 0 (light), or null (not yet placed).
- * Indexed as grid[row][col], where row 0 is the top and col 0 is the left.
+ * Generator polynomial for the 10-bit BCH code that protects format information.
+ * x^10 + x^8 + x^5 + x^4 + x^2 + x + 1 = 0b10100110111
  */
-export const grid = Array.from({ length: size }, () => new Array(size).fill(null));
+const FORMAT_BCH_GENERATOR = 0x537;
 
-/**
- * Tracks which cells are occupied by structural patterns (finders, alignments,
- * timing strips, dark module). The data placement step must skip reserved cells.
- */
-const reserved = Array.from({ length: size }, () => new Array(size).fill(false));
+/** XOR mask applied to the 15-bit format string per the QR spec. */
+const FORMAT_MASK = 0x5412;
 
-// ─── Alignment pattern centres ────────────────────────────────────────────────
+export class QR {
+	version;
+	size;
+	grid;
+	reserved;
+	#alignmentCenters;
 
-const coords = alignmentPatternPositions[version];
-const last   = coords[coords.length - 1];
-const alignmentCenters = [];
+	constructor(version) {
+		this.version  = version;
+		this.size     = 4 * version + 17;
+		this.grid     = Array.from({ length: this.size }, () => new Array(this.size).fill(null));
+		this.reserved = Array.from({ length: this.size }, () => new Array(this.size).fill(false));
 
-// Build the list of alignment centre coordinates, skipping any position that
-// would overlap the three finder patterns (corners: top-left, top-right, bottom-left).
-for (const r of coords) {
-	for (const c of coords) {
-		const overlapsTopLeft    = r === TIMING_STRIP && c === TIMING_STRIP;
-		const overlapsTopRight   = r === TIMING_STRIP && c === last;
-		const overlapsBottomLeft = r === last          && c === TIMING_STRIP;
-		if (overlapsTopLeft || overlapsTopRight || overlapsBottomLeft) continue;
-		alignmentCenters.push([r, c]);
+		const coords = alignmentPatternPositions[version];
+		const last   = coords[coords.length - 1];
+		this.#alignmentCenters = [];
+		for (const r of coords) {
+			for (const c of coords) {
+				if ((r === TIMING_STRIP && c === TIMING_STRIP) ||
+				    (r === TIMING_STRIP && c === last)          ||
+				    (r === last         && c === TIMING_STRIP)) continue;
+				this.#alignmentCenters.push([r, c]);
+			}
+		}
+
+		this.#finders();
+		this.#alignments();
+		this.#timing();
+		this.#darkModule();
+		this.#formatInfo();
+		if (version >= 7) this.#versionInfo();
 	}
-}
 
-// ─── Pattern drawing functions ────────────────────────────────────────────────
+	// ─── Structural pattern methods ───────────────────────────────────────────
 
-/**
- * Draws the three 7×7 finder patterns in the top-left, bottom-left, and
- * top-right corners of the grid.
- *
- * Each finder has a solid outer border, a hollow 5×5 ring, and a solid 3×3
- * center. Scanners use these three identical shapes to locate and orient the code.
- * The 1-module separator that surrounds each finder is left null here and will
- * be written as light during data/format placement.
- */
-function finders() {
-	const positions = [
-		[0,                  0               ], // top-left
-		[size - FINDER_SIZE, 0               ], // bottom-left
-		[0,                  size - FINDER_SIZE], // top-right
-	];
+	#finders() {
+		const positions = [
+			[0,                  0               ],
+			[this.size - FINDER_SIZE, 0          ],
+			[0,                  this.size - FINDER_SIZE],
+		];
 
-	for (const [startRow, startCol] of positions) {
-		for (let i = 0; i < FINDER_SIZE; i++) {
-			for (let j = 0; j < FINDER_SIZE; j++) {
-				const isOuterBorder = i === 0 || i === 6 || j === 0 || j === 6;
-				const isCenter3x3   = i >= 2 && i <= 4 && j >= 2 && j <= 4;
+		for (const [startRow, startCol] of positions) {
+			for (let i = 0; i < FINDER_SIZE; i++) {
+				for (let j = 0; j < FINDER_SIZE; j++) {
+					const isOuterBorder = i === 0 || i === 6 || j === 0 || j === 6;
+					const isCenter3x3   = i >= 2 && i <= 4 && j >= 2 && j <= 4;
+					this.grid[startRow + i][startCol + j]     = isOuterBorder || isCenter3x3 ? 1 : 0;
+					this.reserved[startRow + i][startCol + j] = true;
+				}
+			}
 
-				grid[startRow + i][startCol + j]     = isOuterBorder || isCenter3x3 ? 1 : 0;
-				reserved[startRow + i][startCol + j] = true;
+			const sepRow   = startRow === 0 ? startRow + FINDER_SIZE : startRow - 1;
+			const sepCol   = startCol === 0 ? startCol + FINDER_SIZE : startCol - 1;
+			const colStart = Math.min(startCol, sepCol);
+			const rowStart = Math.min(startRow, sepRow);
+
+			for (let j = colStart; j <= colStart + FINDER_SIZE; j++) {
+				this.grid[sepRow][j]     = 0;
+				this.reserved[sepRow][j] = true;
+			}
+			for (let i = rowStart; i <= rowStart + FINDER_SIZE; i++) {
+				this.grid[i][sepCol]     = 0;
+				this.reserved[i][sepCol] = true;
 			}
 		}
 	}
-}
 
-/**
- * Draws alignment patterns at the spec-defined positions for the current version.
- *
- * Each pattern is a 5×5 square with a hollow center ring and a single dark center
- * module. Larger QR versions use more alignment patterns to help scanners correct
- * for perspective distortion. Centres that would overlap a finder pattern are skipped.
- */
-function alignments() {
-	for (const [r, c] of alignmentCenters) {
-		for (let i = -2; i <= 2; i++) {
-			for (let j = -2; j <= 2; j++) {
-				const isOuterBorder = i === -2 || i === 2 || j === -2 || j === 2;
-				const isCenter      = i === 0 && j === 0;
-
-				grid[r + i][c + j]     = isOuterBorder || isCenter ? 1 : 0;
-				reserved[r + i][c + j] = true;
+	#alignments() {
+		for (const [r, c] of this.#alignmentCenters) {
+			for (let i = -2; i <= 2; i++) {
+				for (let j = -2; j <= 2; j++) {
+					const isOuterBorder = i === -2 || i === 2 || j === -2 || j === 2;
+					const isCenter      = i === 0 && j === 0;
+					this.grid[r + i][c + j]     = isOuterBorder || isCenter ? 1 : 0;
+					this.reserved[r + i][c + j] = true;
+				}
 			}
 		}
 	}
-}
 
-/**
- * Draws the horizontal and vertical timing strips along row 6 and column 6.
- *
- * The strips alternate dark/light (even index = dark) between the finder patterns.
- * Scanners read these to determine module size and derive the coordinate grid.
- * The loop also covers the separator positions at both ends, which naturally
- * receive a light value (odd index) from the alternating pattern.
- */
-function timing() {
-	for (let x = FINDER_SIZE; x <= size - FINDER_SIZE - 1; x++) {
-		grid[TIMING_STRIP][x]     = x % 2 === 0 ? 1 : 0;
-		reserved[TIMING_STRIP][x] = true;
+	#timing() {
+		for (let x = FINDER_SIZE; x <= this.size - FINDER_SIZE - 1; x++) {
+			this.grid[TIMING_STRIP][x]     = x % 2 === 0 ? 1 : 0;
+			this.reserved[TIMING_STRIP][x] = true;
+		}
+		for (let y = FINDER_SIZE; y <= this.size - FINDER_SIZE - 1; y++) {
+			this.grid[y][TIMING_STRIP]     = y % 2 === 0 ? 1 : 0;
+			this.reserved[y][TIMING_STRIP] = true;
+		}
 	}
-	for (let y = FINDER_SIZE; y <= size - FINDER_SIZE - 1; y++) {
-		grid[y][TIMING_STRIP]     = y % 2 === 0 ? 1 : 0;
-		reserved[y][TIMING_STRIP] = true;
+
+	#darkModule() {
+		this.grid[4 * this.version + 9][DARK_MODULE_COL]     = 1;
+		this.reserved[4 * this.version + 9][DARK_MODULE_COL] = true;
 	}
-}
 
-/**
- * Places the required dark module at row (4 * version + 9), column 8.
- *
- * Every valid QR code must have this module dark per the spec. Its position is
- * fixed regardless of version, data content, or masking pattern.
- */
-function darkModule() {
-	grid[4 * version + 9][DARK_MODULE_COL]     = 1;
-	reserved[4 * version + 9][DARK_MODULE_COL] = true;
-}
+	#formatInfo() {
+		for (let j = 0; j <= 8; j++) {
+			if (j !== TIMING_STRIP) this.reserved[8][j] = true;
+		}
+		for (let i = 0; i <= 8; i++) {
+			if (i !== TIMING_STRIP) this.reserved[i][8] = true;
+		}
+		for (let j = this.size - FINDER_SIZE - 1; j < this.size; j++) {
+			this.reserved[8][j] = true;
+		}
+		for (let i = this.size - FINDER_SIZE; i < this.size; i++) {
+			this.reserved[i][8] = true;
+		}
+	}
 
-/**
- * Draws all structural patterns onto the grid in spec order.
- *
- * Call this before placing format information or data modules. The order matters:
- * finders first so alignment/timing checks can skip reserved cells correctly.
- */
-export function generate() {
-	finders();
-	alignments();
-	timing();
-	darkModule();
+	#versionInfo() {
+		for (let i = 0; i < 6; i++) {
+			for (let j = this.size - 11; j <= this.size - 9; j++) {
+				this.reserved[i][j] = true;
+			}
+		}
+		for (let i = this.size - 11; i <= this.size - 9; i++) {
+			for (let j = 0; j < 6; j++) {
+				this.reserved[i][j] = true;
+			}
+		}
+	}
+
+	// ─── Format information ───────────────────────────────────────────────────
+
+	/**
+	 * Writes the 15-bit format information string into both reserved copies.
+	 *
+	 * The string encodes the error correction level and mask pattern:
+	 *   5 data bits  — 2-bit ECL indicator + 3-bit mask pattern number
+	 *   10 BCH bits  — remainder of (data × x^10) ÷ generator polynomial
+	 *   XOR mask     — 101010000010010, applied to the full 15 bits
+	 *
+	 * Copy 1 wraps the top-left finder (row 8 and col 8, skipping the timing
+	 * strips). Copy 2 mirrors it across the top-right and bottom-left edges.
+	 * Bit 0 (LSB) is placed first; bit 14 (MSB) last.
+	 *
+	 * @param {'L'|'M'|'Q'|'H'} ecLevel     - Error correction level
+	 * @param {number}           maskPattern - Mask pattern index (0–7)
+	 */
+	writeFormatInfo(ecLevel, maskPattern) {
+		const data = (ECL_BITS[ecLevel] << 3) | maskPattern;
+
+		// BCH: shift data up 10 bits then reduce modulo the generator
+		let remainder = data << 10;
+		for (let i = 4; i >= 0; i--) {
+			if ((remainder >> (i + 10)) & 1) remainder ^= FORMAT_BCH_GENERATOR << i;
+		}
+
+		const format = ((data << 10) | (remainder & 0x3FF)) ^ FORMAT_MASK;
+
+		// Copy 1: position 0 (MSB) → (8,0) … position 14 (LSB) → (0,8), skipping timing strip cells
+		const copy1 = [
+			[8,0],[8,1],[8,2],[8,3],[8,4],[8,5],[8,7],[8,8],
+			[7,8],[5,8],[4,8],[3,8],[2,8],[1,8],[0,8],
+		];
+
+		// Copy 2: bit 0 → (size-1,8) … bit 14 → (8,size-1)
+		const copy2 = [
+			[this.size-1,8],[this.size-2,8],[this.size-3,8],[this.size-4,8],
+			[this.size-5,8],[this.size-6,8],[this.size-7,8],
+			[8,this.size-8],[8,this.size-7],[8,this.size-6],[8,this.size-5],
+			[8,this.size-4],[8,this.size-3],[8,this.size-2],[8,this.size-1],
+		];
+
+		for (let bit = 0; bit < 15; bit++) {
+			const value = (format >> (14 - bit)) & 1;
+			this.grid[copy1[bit][0]][copy1[bit][1]] = value;
+			this.grid[copy2[bit][0]][copy2[bit][1]] = value;
+		}
+	}
+
+	// ─── Data placement ───────────────────────────────────────────────────────
+
+	/**
+	 * Places interleaved data + EC codewords onto the grid using the QR spec's
+	 * 2-column zigzag scan pattern.
+	 *
+	 * Walks right-to-left in pairs of columns, alternating upward and downward
+	 * passes. The vertical timing strip (col 6) is skipped. Reserved cells are
+	 * left untouched; remaining cells receive the next bit from the codeword
+	 * stream. Cells beyond the end of the stream are set to 0 (light).
+	 *
+	 * @param {number[]} codewords - Interleaved data + EC bytes (integers 0–255)
+	 */
+	placeData(codewords) {
+		const bits = [];
+		for (const byte of codewords) {
+			for (let i = 7; i >= 0; i--) {
+				bits.push((byte >> i) & 1);
+			}
+		}
+
+		// Append the required number of trailing zero bits for this version
+		for (let i = 0; i < remainderBits[this.version]; i++) {
+			bits.push(0);
+		}
+
+		let bitIndex = 0;
+		let upward   = true;
+
+		for (let right = this.size - 1; right >= 1; right -= 2) {
+			if (right === TIMING_STRIP) right--;
+
+			for (let vert = 0; vert < this.size; vert++) {
+				const row = upward ? this.size - 1 - vert : vert;
+				for (const col of [right, right - 1]) {
+					if (!this.reserved[row][col]) {
+						this.grid[row][col] = bitIndex < bits.length ? bits[bitIndex++] : 0;
+					}
+				}
+			}
+			upward = !upward;
+		}
+	}
 }

@@ -41,6 +41,7 @@
     "39": [6, 26, 54, 82, 110, 138, 166],
     "40": [6, 30, 58, 86, 114, 142, 170]
   },
+  "remainderBits": [0, 0, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0],
   "characterCapacities": {
     "1":  { "L": { "numeric": 41,   "alphanumeric": 25,   "byte": 17,   "kanji": 10  }, "M": { "numeric": 34,   "alphanumeric": 20,   "byte": 14,   "kanji": 8   }, "Q": { "numeric": 27,   "alphanumeric": 16,   "byte": 11,   "kanji": 7   }, "H": { "numeric": 17,   "alphanumeric": 10,   "byte": 7,    "kanji": 4   } },
     "2":  { "L": { "numeric": 77,   "alphanumeric": 47,   "byte": 32,   "kanji": 20  }, "M": { "numeric": 63,   "alphanumeric": 38,   "byte": 26,   "kanji": 16  }, "Q": { "numeric": 48,   "alphanumeric": 29,   "byte": 20,   "kanji": 12  }, "H": { "numeric": 34,   "alphanumeric": 20,   "byte": 14,   "kanji": 8   } },
